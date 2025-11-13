@@ -28,21 +28,20 @@ class SatelliteWealthDataset(Dataset):
         return len(self.dataframe)
 
     def __getitem__(self, idx):
-        img_path = self.dataframe.iloc[idx]['image_path']
+        row = self.dataframe.iloc[idx]
+        img_path = row['image_path']
+        
         with rasterio.open(img_path) as src:
-            img = src.read(1)  # Read the first band only (1-channel)
-            img = img.astype(np.float32)
+            img = src.read(1).astype(np.float32)  # Read the first band only (1-channel)
             img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
-            img = (img - img.mean()) / (img.std() + 1e-7)  # Normalize
-            img = torch.tensor(img, dtype=torch.float32).unsqueeze(0)  # Add channel dim: (1, H, W)
-
-        img = torch.tensor(img, dtype=torch.float32)
+            img = (img - img.mean()) / (img.std() + 1e-7)  # Per image normalization
+            img = torch.from_numpy(img).float().unsqueeze(0)  # Shape: (1, H, W)
 
         if self.transform:
             img = self.transform(img)
 
-        label = self.dataframe.iloc[idx]['wealthpooled']
-        return img, torch.tensor(label, dtype=torch.float32)
+        label = torch.tensor(row['wealthpooled'], dtype=torch.float32)
+        return img, label
 
 # --- Helper functions ---
 def seed_everything(seed=42):
@@ -72,10 +71,11 @@ def match_images_to_labels(csv_path, image_folder, target_column):
     return pd.DataFrame(matches)
 
 # --- Training function ---
-def train_model(model, train_loader, test_loader, device, optimizer, criterion, scheduler, scaler, num_epochs, use_cuda=False):
-    train_losses = []
-    test_r2s = []
-    best_r2 = -float('inf')
+def train_model(model, train_loader, test_loader, device, optimizer, criterion, scheduler, scaler, num_epochs, use_cuda=False, patience=10):
+    train_losses, val_r2s = [], []
+    best_r2 = -float("inf")
+    best_state = None
+    epochs_no_improve = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -86,8 +86,9 @@ def train_model(model, train_loader, test_loader, device, optimizer, criterion, 
 
             optimizer.zero_grad()
             with torch.amp.autocast(device_type='cuda' if use_cuda else 'cpu', enabled=use_cuda):
-                preds = model(imgs).squeeze()
+                preds = model(imgs).squeeze(-1)
                 loss = criterion(preds, labels)
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -100,20 +101,37 @@ def train_model(model, train_loader, test_loader, device, optimizer, criterion, 
         with torch.no_grad():
             for imgs, labels in test_loader:
                 imgs = imgs.to(device)
-                outputs = model(imgs).squeeze().cpu().numpy()
-                preds.extend(outputs)
-                trues.extend(labels.numpy())
+                outputs = model(imgs).detach().cpu().view(-1).numpy()
+                preds.extend(outputs.tolist())
+                trues.extend(labels.view(-1).numpy().tolist())
 
-        r2 = r2_score(trues, preds)
-        epoch_loss = running_loss / len(train_loader)
-        scheduler.step(r2)
+        val_r2 = r2_score(trues, preds)
 
-        print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f} - R²: {r2:.4f}")
+        epoch_loss = running_loss / max(1, len(train_loader))
+
+        scheduler.step(val_r2)  
+
+        print(f"Epoch {epoch+1}/{num_epochs} - TrainLoss: {epoch_loss:.4f} - Val R²: {val_r2:.4f}")
 
         train_losses.append(epoch_loss)
-        test_r2s.append(r2)
+        val_r2s.append(val_r2)
 
-    return train_losses, test_r2s, max(test_r2s)
+        # ---- Early stopping on best Val R² ----
+        if val_r2 > best_r2 + 1e-4:
+            best_r2 = val_r2
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch+1} (no Val R² improvement for {patience} epochs).")
+                break
+
+    # Restore best weights
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    return train_losses, val_r2s, best_r2
 
 def build_efficientnet_b3(dropout_rate=0.3):
     base = models.efficientnet_b3(weights=models.EfficientNet_B3_Weights.IMAGENET1K_V1)
@@ -202,8 +220,8 @@ def objective(trial, index_name, model_name):
         print(f"Model: ResNet-34")
 
         batch_size = trial.suggest_categorical("batch_size", [64, 128])
-        lr = trial.suggest_float("lr", 1e-4, 3e-3, log=True)
-        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-4, log=True)
+        lr = trial.suggest_float("lr", 1e-5, 3e-4, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-4, log=True)
         dropout_rate = trial.suggest_float("dropout", 0.2, 0.4)
         optimizer_choice = trial.suggest_categorical("optimizer", ["Adam"])
 
@@ -231,13 +249,12 @@ def objective(trial, index_name, model_name):
         factor=0.5, 
         patience=5,
         cooldown=1,
-        min_lr=1e-6,
-        verbose=True
+        min_lr=1e-6
         )
     scaler = torch.amp.GradScaler(enabled=use_cuda)
 
     # Train model
-    train_losses, test_r2s, best_r2 = train_model(model, train_loader, test_loader, device, optimizer, criterion, scheduler, scaler, num_epochs=num_epochs, use_cuda=use_cuda)
+    train_losses, test_r2s, best_r2 = train_model(model, train_loader, test_loader, device, optimizer, criterion, scheduler, scaler, num_epochs=num_epochs, use_cuda=use_cuda, patience=10)
 
     TRIAL_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", trial.number))  # Fallback if running locally
 
@@ -260,8 +277,9 @@ def create_objective(index_name, model_name):
 
 # --- Main ---
 def main():
+    seed_everything(42)
     allowed_indices = ["ndvi", "vari", "msavi", "mndwi", "ndmi", "ndbi"]
-    allowed_models = ["resnet34", "efficientnet", "vgg"]
+    allowed_models = ["resnet", "efficientnet", "vgg"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--trial-id", type=int, required=True)
@@ -276,7 +294,7 @@ def main():
 
     study = optuna.load_study(
         study_name=f'{args.model}_{args.index}',
-        storage=f"sqlite:///../optuna/storage/{args.model}/{args.model}_{args.index}.db",
+        storage=f"sqlite:///../optuna/storage/single/{args.model}/{args.model}_{args.index}.db",
     )
  
     study.optimize(objective_wrapper, n_trials=1)
