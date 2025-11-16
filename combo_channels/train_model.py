@@ -72,8 +72,36 @@ def match_images_to_labels(csv_path, image_folder, target_column):
 
     return pd.DataFrame(matches)
 
+def save_results(trial, index_name, model_name, model, val_r2s):
+    TRIAL_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", trial.number))  # Fallback if running locally
+    model_output_dir = f"../optuna/models/single/{model_name}/{index_name}"
+    os.makedirs(model_output_dir, exist_ok=True)
+    # Save best model for this trial
+    torch.save(model.state_dict(), f"{model_output_dir}/trial_{TRIAL_ID}.pth")
+
+    r2_scores_output_dir = f"../optuna/r2_scores/single/{model_name}/{index_name}"
+    os.makedirs(r2_scores_output_dir, exist_ok=True)
+    # Save R² scores per epoch for this trial
+    np.save(f"{r2_scores_output_dir}/trial_{TRIAL_ID}.npy", np.array(val_r2s))
+
 # --- Training function ---
-def train_model(model, train_loader, test_loader, device, optimizer, criterion, scheduler, scaler, num_epochs, use_cuda=False, patience=10, trial=None, deadline_ts=None):
+def train_model(
+    model, 
+    train_loader, 
+    test_loader, 
+    device, 
+    optimizer, 
+    criterion, 
+    scheduler, 
+    scaler, 
+    num_epochs, 
+    index_name, 
+    model_name,
+    use_cuda=False, 
+    patience=10, 
+    trial=None, 
+    deadline_ts=None,
+    ):
     train_losses, val_r2s = [], []
     best_r2 = -float("inf")
     best_state = None
@@ -85,6 +113,7 @@ def train_model(model, train_loader, test_loader, device, optimizer, criterion, 
 
         for imgs, labels in train_loader:
             if deadline_ts and time.time() > deadline_ts:
+                save_results(trial, index_name, model_name, model, val_r2s)
                 print("Time limit for the trial exceeded. Pruning trial.")
                 raise optuna.exceptions.TrialPruned("Time limit for the trial exceeded.")
             imgs, labels = imgs.to(device), labels.to(device)
@@ -126,6 +155,7 @@ def train_model(model, train_loader, test_loader, device, optimizer, criterion, 
         # also guard validation
         if deadline_ts and time.time() > deadline_ts:
             print("Time limit for the trial exceeded. Pruning trial.")
+            save_results(trial, index_name, model_name, model, val_r2s)
             raise optuna.exceptions.TrialPruned("Time limit (30 min) exceeded.")
 
         # ---- Early stopping on best Val R² ----
@@ -167,7 +197,7 @@ def build_efficientnet_b3(dropout_rate=0.3):
             return x
 
     return EfficientNetRegressor(base)
-    
+
 # --- Optuna objective function ---
 def objective(trial, index_name, model_name):
     # Paths
@@ -297,7 +327,7 @@ def objective(trial, index_name, model_name):
         )
     scaler = torch.amp.GradScaler(enabled=use_cuda)
 
-    budget_sec = int(os.environ.get("TRIAL_TIME_BUDGET_SEC", 300))  # 5 min default
+    budget_sec = int(os.environ.get("TRIAL_TIME_BUDGET_SEC", 10800))  # 3 hours default
     deadline = time.time() + budget_sec
 
     # Train model
@@ -311,24 +341,16 @@ def objective(trial, index_name, model_name):
         scheduler, 
         scaler, 
         num_epochs=num_epochs, 
+        index_name=index_name, 
+        model_name=model_name,
         use_cuda=use_cuda,
         patience=10,
         trial=trial, 
         deadline_ts=deadline
         )
 
-    TRIAL_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", trial.number))  # Fallback if running locally
-
-    model_output_dir = f"../optuna/models/single/{model_name}/{index_name}"
-    os.makedirs(model_output_dir, exist_ok=True)
-    # Save best model for this trial
-    torch.save(model.state_dict(), f"{model_output_dir}/trial_{TRIAL_ID}.pth")
-
-    r2_scores_output_dir = f"../optuna/r2_scores/single/{model_name}/{index_name}"
-    os.makedirs(r2_scores_output_dir, exist_ok=True)
-    # Save R² scores per epoch for this trial
-    np.save(f"{r2_scores_output_dir}/trial_{TRIAL_ID}.npy", np.array(val_r2s))
-
+    save_results(trial, index_name, model_name, model, val_r2s)
+    
     return best_r2
 
 def create_objective(index_name, model_name):
