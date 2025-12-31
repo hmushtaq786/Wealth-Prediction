@@ -10,3 +10,18 @@ venv311
 
 combo_channels/optuna
 combo_channels/combinations.txt
+
+venv_gpu
+venv
+
+*.pth
+*.pkl
+*.npy
+*.h5
+visualizations/map_shape/ne_110m_admin_0_countries.cpg
+visualizations/map_shape/ne_110m_admin_0_countries.dbf
+visualizations/map_shape/ne_110m_admin_0_countries.prj
+visualizations/map_shape/ne_110m_admin_0_countries.shp
+visualizations/map_shape/ne_110m_admin_0_countries.shx
+visualizations/ne_110m_admin_0_countries/ne_110m_admin_0_countries.README.html
+visualizations/ne_110m_admin_0_countries/ne_110m_admin_0_countries.VERSION.txt

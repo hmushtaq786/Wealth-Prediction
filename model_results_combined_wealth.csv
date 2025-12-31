@@ -1,0 +1,16 @@
+Model,Bins,Index,Best Parameters,Test R²,Test MSE
+xgboost,25,msavi_vari_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7064381037369585,0.2159375441589624
+xgboost,25,ndvi_msavi_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7011735598656051,0.21981002450865508
+xgboost,25,ndvi_msavi_vari_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7076524781661921,0.21504427757608416
+xgboost,25,ndvi_ndbi_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7043159704128025,0.21749853781729991
+xgboost,25,ndvi_vari_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.707245620331135,0.21534355307076666
+gradient_boost,25,msavi_vari_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7057402679057765,0.21645085653883792
+gradient_boost,25,ndvi_msavi_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7006623343100771,0.22018607055678766
+gradient_boost,25,ndvi_msavi_vari_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7056197186460589,0.21653952986948805
+gradient_boost,25,ndvi_ndbi_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7015785716770637,0.21951210690751186
+gradient_boost,25,ndvi_vari_25,"{'learning_rate': 0.1, 'max_depth': 7, 'n_estimators': 200}",0.7037261056958224,0.21793242906814733
+random_forest,25,msavi_vari_25,"{'max_depth': 20, 'n_estimators': 200}",0.7029235209432083,0.2185227924043468
+random_forest,25,ndvi_msavi_25,"{'max_depth': 20, 'n_estimators': 200}",0.7003353936102036,0.22042656079995274
+random_forest,25,ndvi_msavi_vari_25,"{'max_depth': 20, 'n_estimators': 200}",0.7032948169105193,0.21824967542166648
+random_forest,25,ndvi_ndbi_25,"{'max_depth': 20, 'n_estimators': 200}",0.7066324001286746,0.21579462409269973
+random_forest,25,ndvi_vari_25,"{'max_depth': 20, 'n_estimators': 200}",0.7055250993493511,0.216609129701146
