@@ -6,8 +6,8 @@
 #SBATCH -a 0-4                                            # 5 trials = 5 jobs, Max 5 trials at once
 #SBATCH -n 1
 #SBATCH -c 8    # Each trial gets 8 CPU cores
-#SBATCH --output=../../slurm_logs/single/model_training/resnet/ndvi/training-score_trial_%A_%a.out      # where to write output, %x give job name, %j names job id
-#SBATCH --error=../../slurm_logs/single/model_training/resnet/ndvi/training-score_trial_%A_%a.err       # where to write slurm error
+#SBATCH --output=../../slurm_logs/single/model_training/training-score_trial_%A_%a.out      # where to write output, %x give job name, %j names job id
+#SBATCH --error=../../slurm_logs/single/model_training/training-score_trial_%A_%a.err       # where to write slurm error
 
 # === Workspace allocation ===
 WS_DIR=$(ws_allocate -F ceph-ssd hmushtaq 30)

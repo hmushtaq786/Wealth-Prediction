@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=create_study
+#SBATCH --job-name=create_multi_study
 #SBATCH -t 02:00:00
 #SBATCH -p grete:interactive
 #SBATCH --gres=gpu:1g.10gb
-#SBATCH --output=../../slurm_logs/create_study/create_study_%A.out
-#SBATCH --error=../../slurm_logs/create_study/create_study_%A.err
+#SBATCH --output=../../slurm_logs/multi/create_study/create_study_%A.out
+#SBATCH --error=../../slurm_logs/multi/create_study/create_study_%A.err
 
 # === Environment setup ===
 module load python
@@ -12,5 +12,5 @@ module load uv
 # uv venv
 source ../.venv/bin/activate
 
-echo "Creating study for index: $INDICES and model: $MODEL"
+echo "Creating study for indices: $INDICES and model: $MODEL"
 python -u create_multi_optuna_study.py --indices $INDICES --model "$MODEL"

@@ -7,3 +7,6 @@ venv311
 *.pth
 *.npy
 *.pt
+
+combo_channels/optuna
+combo_channels/combinations.txt

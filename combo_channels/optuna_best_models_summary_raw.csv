@@ -1,0 +1,4 @@
+model_name,best_trial_number,r2_score,best_params
+efficientnet,47,0.49535041423827786,"{""batch_size"": 64, ""lr"": 0.0005150657393594638, ""weight_decay"": 2.0169282172754315e-05, ""dropout"": 0.252333133876385, ""optimizer"": ""Adam""}"
+resnet,3,0.44722104084441405,"{""batch_size"": 128, ""lr"": 0.00010868001686128352, ""weight_decay"": 7.531054542299871e-05, ""dropout"": 0.33584975084785673, ""optimizer"": ""Adam""}"
+vgg,4,0.45530488560099025,"{""batch_size"": 64, ""lr"": 5.80443537784925e-05, ""weight_decay"": 3.4473384013523664e-05, ""dropout"": 0.3993759136437803, ""optimizer"": ""Adam""}"

@@ -2,7 +2,7 @@ import optuna
 import argparse
 import os
 
-allowed_indices = ["ndvi", "vari", "msavi", "mndwi", "ndmi", "ndbi"]
+allowed_indices = ["ndvi", "vari", "msavi", "mndwi", "ndbi", "ndmi"]
 allowed_models = ["resnet", "efficientnet", "vgg"]
 
 parser = argparse.ArgumentParser()

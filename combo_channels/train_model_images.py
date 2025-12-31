@@ -31,94 +31,81 @@ class SatelliteWealthDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.dataframe.iloc[idx]
-        index_paths = row['image_paths']  # Dict: {'ndvi': path1, 'vari': path2, ...}
+        img_path = row['image_path']
+        
+        with rasterio.open(img_path) as src:
+            img = src.read(list(range(1, 7))).astype(np.float32)  # (6, H, W)
+            img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
 
-        channels = []
-        for path in index_paths.values():
-            with rasterio.open(path) as src:
-                img = src.read(1).astype(np.float32)
-                img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
-                img = (img - img.mean()) / (img.std() + 1e-7)  # Normalize
-                channels.append(torch.tensor(img))
+            # Per-channel normalization
+            mean = img.mean(axis=(1, 2), keepdims=True)
+            std = img.std(axis=(1, 2), keepdims=True) + 1e-7
+            img = (img - mean) / std
 
-        img_tensor = torch.stack(channels, dim=0)  # Shape: (C, H, W)
+            img = torch.from_numpy(img).float()  # (6, H, W)
 
         if self.transform:
-            img_tensor = self.transform(img_tensor)
+            img = self.transform(img)
 
         label = torch.tensor(row['wealthpooled'], dtype=torch.float32)
-        return img_tensor, label
-
+        return img, label
 
 # --- Helper functions ---
 def seed_everything(seed=42):
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def parse_filename(filepath):
+    base = os.path.basename(filepath).replace('.tif', '')
+    lat, lon, year = base.split('_')
+    return float(lat), float(lon), int(year)
 
-def match_multichannel_images_to_labels(csv_path, image_root_folder, indices, target_column):
+def match_images_to_labels(csv_path, image_folder, target_column):
     dhs_df = pd.read_csv(csv_path)
-    image_groups = {}
-
-    for idx_name in indices:
-        folder = os.path.join(image_root_folder, idx_name.upper(), f"{idx_name}_images")
-        for fname in os.listdir(folder):
-            if fname.endswith('.tif'):
-                base = fname.replace('.tif', '')
-                _, lat, lon, year = base.split('_')
-                key = f"{lat}_{lon}_{year}"
-                path = os.path.join(folder, fname)
-                image_groups.setdefault(key, {})[idx_name] = path
+    image_files = [os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.endswith('.tif')]
 
     matches = []
-    for key, paths in image_groups.items():
-        if len(paths) != len(indices):
-            continue  # Skip if any index is missing
-
-        lat, lon, year = map(float, key.split('_'))
-        distances = np.sqrt((dhs_df['LATNUM'] - lat) ** 2 + (dhs_df['LONGNUM'] - lon) ** 2)
+    for file in image_files:
+        lat, lon, year = parse_filename(file)
+        distances = np.sqrt((dhs_df['LATNUM'] - lat)**2 + (dhs_df['LONGNUM'] - lon)**2)
         nearest_idx = distances.idxmin()
         wealth_value = dhs_df.loc[nearest_idx, target_column]
-        matches.append({'image_paths': paths, 'wealthpooled': wealth_value})
+        matches.append({'image_path': file, 'wealthpooled': wealth_value})
 
     return pd.DataFrame(matches)
 
-
-def save_results(TRIAL_ID, index_name, model_name, model, val_r2s):
-    model_output_dir = f"../optuna/models/multi/{model_name}/{index_name}"
+def save_results(trial, model_name, model, val_r2s):
+    TRIAL_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", trial.number))  # Fallback if running locally
+    model_output_dir = f"../optuna/models/raw_images/{model_name}/raw_images"
     os.makedirs(model_output_dir, exist_ok=True)
     # Save best model for this trial
     torch.save(model.state_dict(), f"{model_output_dir}/trial_{TRIAL_ID}.pth")
 
-    r2_scores_output_dir = f"../optuna/r2_scores/multi/{model_name}/{index_name}"
+    r2_scores_output_dir = f"../optuna/r2_scores/raw_images/{model_name}/raw_images"
     os.makedirs(r2_scores_output_dir, exist_ok=True)
     # Save R² scores per epoch for this trial
     np.save(f"{r2_scores_output_dir}/trial_{TRIAL_ID}.npy", np.array(val_r2s))
 
-
 # --- Training function ---
 def train_model(
-    model,
-    train_loader,
-    test_loader,
-    device,
-    optimizer,
-    criterion,
-    scheduler,
-    scaler,
-    num_epochs,
-    index_name,
+    model, 
+    train_loader, 
+    test_loader, 
+    device, 
+    optimizer, 
+    criterion, 
+    scheduler, 
+    scaler, 
+    num_epochs, 
     model_name,
-    use_cuda=False,
-    patience=10,
-    trial=None,
+    use_cuda=False, 
+    patience=10, 
+    trial=None, 
     deadline_ts=None,
-    TRIAL_ID=None,
-):
+    ):
     train_losses, val_r2s = [], []
     best_r2 = -float("inf")
     best_state = None
@@ -130,10 +117,9 @@ def train_model(
 
         for imgs, labels in train_loader:
             if deadline_ts and time.time() > deadline_ts:
-                save_results(TRIAL_ID, index_name, model_name, model, val_r2s)
+                save_results(trial, model_name, model, val_r2s)
                 print("Time limit for the trial exceeded. Pruning trial.")
                 raise optuna.exceptions.TrialPruned("Time limit for the trial exceeded.")
-
             imgs, labels = imgs.to(device), labels.to(device)
 
             optimizer.zero_grad()
@@ -160,8 +146,10 @@ def train_model(
                 trues.extend(labels.view(-1).numpy().tolist())
 
         val_r2 = r2_score(trues, preds)
+
         epoch_loss = running_loss / max(1, len(train_loader))
-        scheduler.step(val_r2)
+
+        scheduler.step(val_r2)  
 
         print(f"Epoch {epoch+1}/{num_epochs} - TrainLoss: {epoch_loss:.4f} - Val R²: {val_r2:.4f}")
 
@@ -171,8 +159,8 @@ def train_model(
         # also guard validation
         if deadline_ts and time.time() > deadline_ts:
             print("Time limit for the trial exceeded. Pruning trial.")
-            save_results(TRIAL_ID, index_name, model_name, model, val_r2s)
-            raise optuna.exceptions.TrialPruned("Time limit (3 hours) exceeded.")
+            save_results(trial, model_name, model, val_r2s)
+            raise optuna.exceptions.TrialPruned("Time limit (30 min) exceeded.")
 
         # ---- Early stopping on best Val R² ----
         if val_r2 > best_r2 + 1e-4:
@@ -191,10 +179,9 @@ def train_model(
 
     return train_losses, val_r2s, best_r2
 
-
-def build_efficientnet_b3(input_channels=6, dropout_rate=0.3):
+def build_efficientnet_b3(dropout_rate=0.3):
     base = models.efficientnet_b3(weights=models.EfficientNet_B3_Weights.IMAGENET1K_V1)
-    base.features[0][0] = nn.Conv2d(input_channels, 40, kernel_size=3, stride=2, padding=1, bias=False)
+    base.features[0][0] = nn.Conv2d(6, 40, kernel_size=3, stride=2, padding=1, bias=False)
 
     class EfficientNetRegressor(nn.Module):
         def __init__(self, backbone):
@@ -215,46 +202,35 @@ def build_efficientnet_b3(input_channels=6, dropout_rate=0.3):
 
     return EfficientNetRegressor(base)
 
-
 # --- Optuna objective function ---
-def objective(trial, indices, model_name, input_channels=1):
+def objective(trial, model_name):
     # Paths
     CSV_FILE = os.environ.get('WS_DIR') + '/dhs_wealth_index_cleaned.csv'
-    ROOT_IMAGE_FOLDER = os.environ.get('WS_DIR') + f'/processed'
+    IMAGE_FOLDER = os.environ.get('WS_DIR') + f'/images/images'
     TARGET_COLUMN = 'wealthpooled'
 
-    TRIAL_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", trial.number))  # Fallback if running locally
-
     num_epochs = 70
-    patience = 10
-
-    img_size = 224
-    if model_name == "efficientnet":
-        img_size = 300  # B3 default
 
     # Transforms
     train_transform = T.Compose([
         T.RandomHorizontalFlip(),
         T.RandomVerticalFlip(),
-        T.RandomRotation(degrees=30, fill=0),
-        T.Resize((img_size, img_size)),
+        T.RandomRotation(degrees=30),
+        T.Resize((224, 224)),
     ])
-    test_transform = T.Compose([T.Resize((img_size, img_size))])
+    test_transform = T.Compose([T.Resize((224, 224))])
 
-    # Prepare dataset
-    dataset_df = match_multichannel_images_to_labels(CSV_FILE, ROOT_IMAGE_FOLDER, indices, TARGET_COLUMN)
+    # --- Prepare dataset with stratified + geo-aware split ---
+    dataset_df = match_images_to_labels(CSV_FILE, IMAGE_FOLDER, TARGET_COLUMN)
 
     # Stratify by wealth quantiles to balance label distribution
     y = dataset_df[TARGET_COLUMN]
     bins = pd.qcut(y, q=5, labels=False, duplicates='drop')
-
     # Group by rounded lat/lon to prevent geographic leakage (e.g., nearby tiles in both sets)
-    primary_idx = indices[0]
-    geo_group = dataset_df['image_paths'].apply(
-        lambda paths: tuple(
-            round(float(os.path.basename(paths[primary_idx]).split('_')[i]), 2)
-            for i in [1, 2]
-        )
+    geo_group = (
+        dataset_df['image_path']
+        .apply(lambda p: os.path.basename(p).split('_'))
+        .apply(lambda parts: (round(float(parts[0]), 2), round(float(parts[1]), 2)))
     )
 
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
@@ -276,7 +252,6 @@ def objective(trial, indices, model_name, input_channels=1):
     weight_decay = None
     dropout_rate = None
     optimizer_choice = None
-
     if model_name == "efficientnet":
         print(f"Model: EfficientNet-B3")
 
@@ -286,7 +261,7 @@ def objective(trial, indices, model_name, input_channels=1):
         dropout_rate = trial.suggest_float("dropout", 0.2, 0.3)
         optimizer_choice = trial.suggest_categorical("optimizer", ["Adam"])
 
-        model = build_efficientnet_b3(input_channels, dropout_rate=dropout_rate)
+        model = build_efficientnet_b3(dropout_rate=dropout_rate)
 
     elif model_name == "vgg":
         print(f"Model: VGG-16")
@@ -298,12 +273,12 @@ def objective(trial, indices, model_name, input_channels=1):
         optimizer_choice = trial.suggest_categorical("optimizer", ["Adam"])
 
         model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
-        model.features[0] = nn.Conv2d(input_channels, 64, kernel_size=3, stride=1, padding=1)
+        model.features[0] = nn.Conv2d(6, 64, kernel_size=3, stride=1, padding=1)
         model.classifier[-1] = nn.Sequential(
             nn.Dropout(p=dropout_rate),
             nn.Linear(model.classifier[-1].in_features, 1)
         )
-
+        
     else:
         print(f"Model: ResNet-34")
 
@@ -314,51 +289,46 @@ def objective(trial, indices, model_name, input_channels=1):
         optimizer_choice = trial.suggest_categorical("optimizer", ["Adam"])
 
         model = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
-        model.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        model.conv1 = nn.Conv2d(6, 64, kernel_size=7, stride=2, padding=3, bias=False)
         model.fc = nn.Sequential(
             nn.Dropout(p=dropout_rate),
             nn.Linear(model.fc.in_features, 1)
         )
 
-    index_name = "_".join(indices)
-
-    print(f"Index: {index_name}")
     print(f"Batch Size: {batch_size} - LR: {lr} - Weight Decay: {weight_decay} - Dropout Rate: {dropout_rate}")
 
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=6,
-        prefetch_factor=2,
-        pin_memory=use_cuda,
-        timeout=300  # 5 minutes
-    )
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=4, 
+        pin_memory=use_cuda, 
+        prefetch_factor = 2,
+        timeout=300 # 5 minutes
+        )
     test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=6,
-        prefetch_factor=2,
-        pin_memory=use_cuda,
-        timeout=300  # 5 minutes
-    )
-
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=4, 
+        pin_memory=use_cuda, 
+        prefetch_factor = 2,
+        timeout=300 # 5 minutes
+        )
+    
     model = model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     criterion = nn.MSELoss()
-
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",      # because higher R² is better
-        factor=0.5,      # shrink LR by 2x
-        patience=5,      # wait 5 epochs with no R² improvement
-        cooldown=1,      # brief cooldown after a step
-        min_lr=1e-6,     # don’t vanish LR
-    )
-
+        optimizer, 
+        mode='max', 
+        factor=0.5, 
+        patience=5,
+        cooldown=1,
+        min_lr=1e-6
+        )
     scaler = torch.amp.GradScaler(enabled=use_cuda)
 
     budget_sec = int(os.environ.get("TRIAL_TIME_BUDGET_SEC", 10800))  # 3 hours default
@@ -366,65 +336,54 @@ def objective(trial, indices, model_name, input_channels=1):
 
     # Train model
     train_losses, val_r2s, best_r2 = train_model(
-        model,
-        train_loader,
-        test_loader,
-        device,
-        optimizer,
-        criterion,
-        scheduler,
-        scaler,
+        model, 
+        train_loader, 
+        test_loader, 
+        device, 
+        optimizer, 
+        criterion, 
+        scheduler, 
+        scaler, 
         num_epochs=num_epochs,
-        index_name=index_name,
         model_name=model_name,
         use_cuda=use_cuda,
-        patience=patience,
-        trial=trial,
-        deadline_ts=deadline,
-        TRIAL_ID=TRIAL_ID,
-    )
+        patience=10,
+        trial=trial, 
+        deadline_ts=deadline
+        )
 
-    save_results(TRIAL_ID, index_name, model_name, model, val_r2s)
-
+    save_results(trial, model_name, model, val_r2s)
+    
     return best_r2
 
-
-def create_objective(indices, model_name, input_channels):
+def create_objective(model_name):
     def objective_wrapper(trial):
-        return objective(trial, indices, model_name, input_channels)
+        return objective(trial, model_name)
     return objective_wrapper
-
 
 # --- Main ---
 def main():
     seed_everything(42)
-    allowed_indices = ["ndvi", "vari", "msavi", "mndwi", "ndbi", "ndmi"]
     allowed_models = ["resnet", "efficientnet", "vgg"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--trial-id", type=int, required=True)
-    parser.add_argument("--indices", nargs='+', required=True, choices=allowed_indices,
-                        help=f"Indices must be a subset of: {', '.join(allowed_indices)}")
     parser.add_argument("--model", type=str, required=True, choices=allowed_models,
-                        help=f"Model must be one of: {', '.join(allowed_models)}")
+                    help=f"Model must be one of: {', '.join(allowed_models)}")
 
     args = parser.parse_args()
-    input_channels = len(args.indices)
 
-    objective_wrapper = create_objective(args.indices, args.model, input_channels)
-
-    index_name = "_".join(args.indices)
+    objective_wrapper = create_objective(args.model)
 
     study = optuna.load_study(
-        study_name=f'{args.model}_{index_name}',
-        storage=f"sqlite:///../optuna/storage/multi/{args.model}/{args.model}_{index_name}.db",
+        study_name=f'{args.model}_images',
+        storage=f"sqlite:///../optuna/storage/raw_images/{args.model}/{args.model}_images.db",
     )
-
+ 
     study.optimize(objective_wrapper, n_trials=1)
 
     print("\nBest trial:")
     print(study.best_trial.params)
-
 
 if __name__ == '__main__':
     main()
